@@ -4,7 +4,7 @@ import threading as th
 import time
 import concurrent.futures
 
-# get all of the file paths in a given path of a directory
+# Get all of the file paths in a given directory
 def get_all_files(folder):
     all_files = []
 
@@ -18,38 +18,36 @@ def get_all_files(folder):
 
     return all_files
 
-# upload a file to VirusTotal and retrive the id of the file after upload
-def get_file_id(file_path):
+# Upload a file to VirusTotal and retrieve the ID of the file after upload
+def get_file_id(file_path, api_key):
     url = "https://www.virustotal.com/api/v3/files"
-    api_key = 'ccc7a97f2f98b70f337c62eb56f65bc2b66b41105b3e8e7203d8394f2b24bbbb'
     
-    files = {
-        "file": (os.path.basename(file_path), open(file_path, 'rb'))
-    }
-    
+    with open(file_path, 'rb') as file:
+        files = {
+            "file": (os.path.basename(file_path), file)
+        }
+        
+        headers = {
+            "accept": "application/json",
+            "x-apikey": api_key
+        }
+        
+        response = requests.post(url, headers=headers, files=files)
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        responseJSN = response.json()
+        return responseJSN['data']['id']
+
+# Get the report of an uploaded file by the ID of the file
+def get_report_by_id(file_id, api_key):
+    url = f'https://www.virustotal.com/api/v3/analyses/{file_id}'
     headers = {
         "accept": "application/json",
         "x-apikey": api_key
     }
-    
-    response = requests.post(url, headers=headers, files=files)
-    responseJSN = response.json()
-    id = responseJSN['data']['id']
 
-    return id
-
-# get report of an uploaded file by the id of the file
-def get_report_by_id(id):
-    url = f'https://www.virustotal.com/api/v3/analyses/{id}'
-    api_key = 'ccc7a97f2f98b70f337c62eb56f65bc2b66b41105b3e8e7203d8394f2b24bbbb'
-    headers = {
-        "accept": "application/json",
-        "x-apikey": api_key
-    }
-
-    # wait for the until the report is finished 
     while True:
         response = requests.get(url=url, headers=headers)
+        response.raise_for_status()  # Raise an exception for HTTP errors
         response_jsn = response.json()
         
         # Check the analysis status
@@ -63,31 +61,47 @@ def get_report_by_id(id):
     
     return response_jsn
 
+def process_file(file_path, api_key):
+    try:
+        file_id = get_file_id(file_path, api_key)
+        report = get_report_by_id(file_id, api_key)
+        return os.path.basename(file_path), report
+    except requests.RequestException as e:
+        print(f'Error processing file {file_path}: {e}')
+        return os.path.basename(file_path), None
 
-folder = input('enter path to folder: ->')
+def main():
+    folder = input('Enter path to folder: ->')
+    api_key = os.getenv('VIRUSTOTAL_API_KEY')  # Load API key from environment variable
 
-all_files_paths = get_all_files(folder)
+    all_files_paths = get_all_files(folder)
 
-files_path_reports = {}
+    files_path_reports = {}
 
-# create a thread for each file in the folder for efficency
-with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_files_paths)) as executor:
-    for file_path in all_files_paths:
-        future = executor.submit(get_report_by_id, get_file_id(file_path=file_path))
-        files_path_reports[os.path.basename(file_path)] = future.result()
+    # Create a thread pool for concurrent processing
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(all_files_paths), 10)) as executor:
+        futures = [executor.submit(process_file, file_path, api_key) for file_path in all_files_paths]
+        
+        for future in concurrent.futures.as_completed(futures):
+            file_name, report = future.result()
+            if report:
+                files_path_reports[file_name] = report
 
-# determine which files are safe and which are not
-for k,v in files_path_reports.items():
-    safe_cnt = 0
-    mali_cnt = 0
-    print('\n')
-    for av, result in v.get('data').get('attributes').get('results').items():
-        if result in ['malicious', 'suspicious']:
-            mali_cnt+=1
+    # Determine which files are safe and which are not
+    for file_name, report in files_path_reports.items():
+        safe_cnt = 0
+        mali_cnt = 0
+        print('\n')
+        for av, result in report.get('data', {}).get('attributes', {}).get('results', {}).items():
+            if result in ['malicious', 'suspicious']:
+                mali_cnt += 1
+            else:
+                safe_cnt += 1
+        
+        if safe_cnt > mali_cnt:
+            print(f'{file_name} is a safe file')
         else:
-            safe_cnt += 1
-    
-    if safe_cnt > mali_cnt:
-        print(f'{k} is a safe file')
-    else:
-        print(f'{k} is a malicious file')
+            print(f'{file_name} is a malicious file')
+
+if __name__ == "__main__":
+    main()
